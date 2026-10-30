@@ -355,7 +355,7 @@ bool SteamManaged(const std::wstring& folder) {
 void CheckFolder(std::wstring folder) {
     PostState(false, true);
     if (!LooksLikeGame(folder)) {
-        PostStatus(Bad, L"no rec room here. install it via steam below, or hit change");
+        PostStatus(Bad, L"no rec room here. install it via steam, or use your own install");
         PostState(false, false, true);
         return;
     }
@@ -363,7 +363,7 @@ void CheckFolder(std::wstring folder) {
     if (stamp.empty() || stamp != Setting(L"VerifiedStamp")) {
         PostStatus(Info, L"checking game files (only the first time)...");
         if (!ModulesMatch(folder)) {
-            PostStatus(Bad, L"that's a different rec room build. get 20260323.14 via steam below");
+            PostStatus(Bad, L"that's a different rec room build. RecFlare needs 20260323.14");
             PostState(false, false, true);
             return;
         }
@@ -903,15 +903,17 @@ void UpdateButtons() {
     const bool steam = g_needGame && !g_ready;
     const bool installed = steam && !SteamInstall(SteamRoot()).empty();
     SetWindowTextW(g_play, !steam ? L"PLAY" : installed ? L"UPDATE VIA STEAM" : L"INSTALL VIA STEAM");
-    SetWindowTextW(g_vr, steam ? L"OLD BUILD VIA STEAM CONSOLE" : L"PLAY IN VR");
+    SetWindowTextW(g_vr, steam ? L"USE MY OWN INSTALL" : L"PLAY IN VR");
+    SetWindowTextW(g_undo, steam ? L"steam console download" : L"undo recflare");
     const bool canUse = (g_ready || g_needGame) && !g_busy;
     EnableWindow(g_play, canUse);
     EnableWindow(g_vr, canUse);
     EnableWindow(g_change, !g_busy);
     EnableWindow(g_open, !g_folder.empty());
-    EnableWindow(g_undo, !g_folder.empty() && !g_busy && Exists(g_folder + L"\\RecRoom.original.exe"));
+    EnableWindow(g_undo, !g_busy && (steam || (!g_folder.empty() && Exists(g_folder + L"\\RecRoom.original.exe"))));
     InvalidateRect(g_play, nullptr, FALSE);
     InvalidateRect(g_vr, nullptr, FALSE);
+    InvalidateRect(g_undo, nullptr, FALSE);
 }
 
 LRESULT CALLBACK ButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
@@ -947,8 +949,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_play = MakeButton(hwnd, IDC_PLAY, L"PLAY", 32, 362, 356, 60);
         g_vr = MakeButton(hwnd, IDC_VR, L"PLAY IN VR", 32, 432, 356, 46);
         g_change = MakeButton(hwnd, IDC_CHANGE, L"change", 318, 318, 70, 28);
-        g_open = MakeButton(hwnd, IDC_FOLDER, L"open game folder", 40, 520, 160, 26);
-        g_undo = MakeButton(hwnd, IDC_UNDO, L"undo recflare", 220, 520, 160, 26);
+        g_open = MakeButton(hwnd, IDC_FOLDER, L"open game folder", 30, 520, 170, 26);
+        g_undo = MakeButton(hwnd, IDC_UNDO, L"undo recflare", 210, 520, 180, 26);
         UpdateButtons();
         return 0;
     case WM_ERASEBKGND:
@@ -967,8 +969,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (LOWORD(wp) == IDC_PLAY) {
                     InstallViaSteam(hwnd);
                 } else {
-                    // Fallback for when Steam's own build isn't 20260323.14 any more.
-                    StartSteamDownload(hwnd);
+                    // A copy they already have somewhere else; it gets the same build check.
+                    std::wstring folder;
+                    if (PickFolder(hwnd, folder)) {
+                        SetFolder(folder);
+                    }
                 }
                 return 0;
             }
@@ -1000,6 +1005,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case IDC_UNDO:
+            if (g_needGame && !g_ready && !g_busy) {
+                // Fallback for when Steam's own build isn't 20260323.14 any more.
+                StartSteamDownload(hwnd);
+                return 0;
+            }
             if (!g_busy && !g_folder.empty() &&
                 MessageBoxW(hwnd,
                             L"put RecRoom.exe back to stock and remove the RecFlare files from this folder?\n"
@@ -1159,7 +1169,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         }
     } else {
         g_needGame = true;
-        g_status = L"no rec room found. get it via steam below (or hit change)";
+        g_status = L"no rec room found. install it via steam, or use your own install";
         g_tone = Info;
         UpdateButtons();
         InvalidateRect(g_window, nullptr, FALSE);

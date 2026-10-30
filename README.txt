@@ -11,16 +11,16 @@ how to use
 2. it looks for rec room in your steam libraries by itself
    - no rec room? press INSTALL VIA STEAM and let steam install it (it's free)
    - different build? press UPDATE VIA STEAM
+   - already got rec room somewhere else? press USE MY OWN INSTALL and pick its folder
    leave the launcher open, it picks the game up when steam is done
 3. press PLAY (desktop) or PLAY IN VR
    the first time it checks your game files which takes a few secs
    if it's your normal steam install it asks if you want a separate copy first, so a future
    steam update can't break RecFlare (6.8 GB, totally optional)
 
-steam's current rec room is the right build (20260323.14). if that ever changes, press
-OLD BUILD VIA STEAM CONSOLE: it copies a download command and opens steam's console, you paste
+steam's current rec room is the right build (20260323.14). if that ever changes, click
+"steam console download" at the bottom: it copies a download command and opens steam's console, you paste
 it with ctrl+v and steam downloads the exact build (manifest 8867414017562658247).
-got rec room somewhere else? hit "change" and pick the folder with RecRoom.exe
 
 what it does to your game folder
 --------------------------------
