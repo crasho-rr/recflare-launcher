@@ -667,6 +667,7 @@ void CopyGame(std::wstring from, std::wstring to) {
     PostState(false, true);
     const unsigned long long total = FolderBytes(from);
     unsigned long long done = 0;
+    int lastPercent = -1;
     std::vector<std::wstring> pending{L""};
     bool ok = true;
     while (ok && !pending.empty()) {
@@ -690,8 +691,11 @@ void CopyGame(std::wstring from, std::wstring to) {
             }
             ok = CopyFileExW((from + name).c_str(), (to + name).c_str(), nullptr, nullptr, nullptr, 0) != 0;
             done += (static_cast<unsigned long long>(entry.nFileSizeHigh) << 32) | entry.nFileSizeLow;
-            PostStatus(Info, L"copying rec room... " +
-                                 std::to_wstring(total ? static_cast<int>(done * 100 / total) : 0) + L"%");
+            const int percent = total ? static_cast<int>(done * 100 / total) : 0;
+            if (percent != lastPercent) {
+                lastPercent = percent;
+                PostStatus(Info, L"copying rec room... " + std::to_wstring(percent) + L"%");
+            }
         } while (ok && FindNextFileW(find, &entry));
         FindClose(find);
     }
@@ -899,12 +903,21 @@ void Paint(HWND hwnd) {
     EndPaint(hwnd, &ps);
 }
 
+// Retitling redraws the button, so leave it alone when the text is the same.
+void SetLabel(HWND button, const wchar_t* text) {
+    wchar_t current[64]{};
+    GetWindowTextW(button, current, 64);
+    if (wcscmp(current, text)) {
+        SetWindowTextW(button, text);
+    }
+}
+
 void UpdateButtons() {
     const bool steam = g_needGame && !g_ready;
     const bool installed = steam && !SteamInstall(SteamRoot()).empty();
-    SetWindowTextW(g_play, !steam ? L"PLAY" : installed ? L"UPDATE VIA STEAM" : L"INSTALL VIA STEAM");
-    SetWindowTextW(g_vr, steam ? L"USE MY OWN INSTALL" : L"PLAY IN VR");
-    SetWindowTextW(g_undo, steam ? L"steam console download" : L"undo recflare");
+    SetLabel(g_play, !steam ? L"PLAY" : installed ? L"UPDATE VIA STEAM" : L"INSTALL VIA STEAM");
+    SetLabel(g_vr, steam ? L"USE MY OWN INSTALL" : L"PLAY IN VR");
+    SetLabel(g_undo, steam ? L"steam console download" : L"undo recflare");
     const bool canUse = (g_ready || g_needGame) && !g_busy;
     EnableWindow(g_play, canUse);
     EnableWindow(g_vr, canUse);
@@ -933,6 +946,9 @@ LRESULT CALLBACK ButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
         SetCursor(LoadCursorW(nullptr, IsWindowEnabled(hwnd) ? IDC_HAND : IDC_ARROW));
         return TRUE;
     }
+    if (msg == WM_ERASEBKGND) {
+        return 1; // WM_DRAWITEM paints every pixel
+    }
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
@@ -955,6 +971,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_ERASEBKGND:
         return 1;
+    case WM_CTLCOLORBTN: {
+        // Anything that still erases a button gets the dark background, not white.
+        static HBRUSH back = CreateSolidBrush(RGB(0x14, 0x12, 0x11));
+        return reinterpret_cast<LRESULT>(back);
+    }
     case WM_PAINT:
         Paint(hwnd);
         return 0;
@@ -1032,10 +1053,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_APP_STATUS: {
         auto* text = reinterpret_cast<std::wstring*>(lp);
-        g_status = *text;
-        g_tone = static_cast<Tone>(wp);
+        if (*text != g_status || static_cast<Tone>(wp) != g_tone) {
+            g_status = *text;
+            g_tone = static_cast<Tone>(wp);
+            RECT line{0, S(484), S(420), S(516)};
+            InvalidateRect(hwnd, &line, FALSE);
+        }
         delete text;
-        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_APP_STATE:
@@ -1128,7 +1152,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.lpszClassName = L"RecFlareLauncher";
     RegisterClassExW(&wc);
 
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    // WS_CLIPCHILDREN: the window's own paint never draws over the buttons.
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     RECT rect{0, 0, S(420), S(564)};
     AdjustWindowRect(&rect, style, FALSE);
     const int width = rect.right - rect.left, height = rect.bottom - rect.top;
