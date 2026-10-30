@@ -6,17 +6,17 @@ one click launcher for RecFlare on rec room **20260323.14**. no injector!!
 
 **download:** grab `RecFlare.Launcher.zip` from [releases](../../releases/latest), unzip, run `RecFlare Launcher.exe`, press play.
 
-the game isn't included, it comes from steam (steam's current rec room is 20260323.14). the launcher finds it in your steam
-libraries, and if it's missing or a different build it gives you **install / update via steam** buttons and picks the game
-up when steam is done. got it somewhere else? **use my own install** picks the folder (same build check). fallback if steam ever moves on: **steam console download** copies
-`download_depot 471710 471711 8867414017562658247` and opens the steam console. your steam login never leaves steam.
+the game isn't in the zip. if you don't have it yet the launcher shows **download**, you pick where it goes
+and it grabs rec room 20260323.14 from the RecFlare mirror (4.5 GB download, about 6.8 GB unpacked, have 12 GB free).
+if it stops, press it again and pick the same place, it picks up where it left off. the zip is checked against a pinned
+sha256 before anything gets unpacked.
 
-on a normal steam install it offers to make a separate copy first so steam updates can't break it, and there's an
-**undo recflare** button that puts the stock exe back.
+the **steam id** switch flips `steam_appid.txt` between spacewar (480, the default) and rec room (471710). it gets written
+when you switch and every time you press play.
 
 ## how it works
 
-- **the launcher** (`src/launcher.cpp`) checks your install is 20260323.14 (sha256 of GameAssembly / Referee / UnityPlayer, only once),
+- **the launcher** (`src/launcher.cpp`) downloads the game if you need it, checks your install is 20260323.14 (sha256 of GameAssembly / Referee / UnityPlayer, only once),
   drops `2026loader.dll` + `2026patch.dll` (+ `2026patch.ini` if you don't have one) into the game folder, and adds an import of
   `2026loader.dll` to `RecRoom.exe` (stock one kept as `RecRoom.original.exe`). then it starts the game and closes when the patch says it's hooked.
 - **the loader** (`loader/loader.cpp`) does what Injector.exe used to do, but from inside the game:
