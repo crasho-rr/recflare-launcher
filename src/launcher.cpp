@@ -46,12 +46,15 @@ const Module kModules[] = {
 // Stock RecRoom.exe of 20260323.14, before the loader import is added.
 const char kStockExe[] = "3BFDDBD82167A7FD3042ABADDD39B6ECAF2B7149407DF606EB6AF0E798A57A70";
 
-enum : UINT { WM_APP_STATUS = WM_APP + 1, WM_APP_STATE, WM_APP_DONE };
+enum : UINT { WM_APP_STATUS = WM_APP + 1, WM_APP_STATE, WM_APP_DONE, WM_APP_FOLDER };
 enum Tone { Info, Good, Bad };
-enum : int { IDC_PLAY = 201, IDC_VR, IDC_CHANGE, IDC_FOLDER };
+enum : int { IDC_PLAY = 201, IDC_VR, IDC_CHANGE, IDC_FOLDER, IDC_UNDO };
 
 HWND g_window;
-HWND g_play, g_vr, g_change, g_open;
+HWND g_play, g_vr, g_change, g_open, g_undo;
+// No usable 20260323.14 install: the two big buttons become the steam steps.
+bool g_needGame = false;
+volatile LONG g_watching = 0;
 std::wstring g_folder;
 std::wstring g_status = L"looking for rec room...";
 Tone g_tone = Info;
@@ -69,7 +72,9 @@ void PostStatus(Tone tone, const std::wstring& text) {
     PostMessageW(g_window, WM_APP_STATUS, tone, reinterpret_cast<LPARAM>(new std::wstring(text)));
 }
 
-void PostState(bool ready, bool busy) { PostMessageW(g_window, WM_APP_STATE, ready, busy); }
+void PostState(bool ready, bool busy, bool needGame = false) {
+    PostMessageW(g_window, WM_APP_STATE, ready, (busy ? 1 : 0) | (needGame ? 2 : 0));
+}
 
 bool ReadAll(const std::wstring& path, Bytes& out) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -234,23 +239,133 @@ std::wstring ExeFolder() {
     return path;
 }
 
+// ---- steam ------------------------------------------------------------------
+
+// 20260323.14 is an old build: Steam's normal install moved on, so players get
+// it with Steam's own console (download_depot), which keeps their login in Steam.
+const wchar_t kDepotCommand[] = L"download_depot 471710 471711 8867414017562658247";
+constexpr unsigned long long kDepotBytes = 6775968514ull;
+constexpr unsigned long long kGameAssemblyBytes = 287903264ull;
+
+std::wstring Widen(const std::string& text) {
+    std::wstring out(MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), static_cast<int>(out.size()));
+    return out;
+}
+
+std::wstring SteamRoot() {
+    wchar_t path[MAX_PATH]{};
+    DWORD size = sizeof(path);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath", RRF_RT_REG_SZ, nullptr, path, &size) !=
+        ERROR_SUCCESS) {
+        return {};
+    }
+    std::wstring root = path;
+    std::replace(root.begin(), root.end(), L'/', L'\\');
+    return root;
+}
+
+// Values of every "key" "value" pair with this key in a Valve KeyValues file.
+std::vector<std::wstring> VdfValues(const std::wstring& file, const char* key) {
+    Bytes text;
+    std::vector<std::wstring> values;
+    if (!ReadAll(file, text)) {
+        return values;
+    }
+    const std::string body(text.begin(), text.end());
+    const std::string token = std::string("\"") + key + "\"";
+    for (size_t at = body.find(token); at != std::string::npos; at = body.find(token, at + 1)) {
+        const size_t open = body.find('"', at + token.size());
+        std::string value;
+        for (size_t i = open + 1; open != std::string::npos && i < body.size() && body[i] != '"'; ++i) {
+            if (body[i] == '\\' && i + 1 < body.size()) {
+                ++i;
+            }
+            value += body[i];
+        }
+        values.push_back(Widen(value));
+    }
+    return values;
+}
+
+// Steam's regular install of Rec Room (whatever build Steam put there).
+std::wstring SteamInstall(const std::wstring& root) {
+    std::vector<std::wstring> libraries{root};
+    for (const auto& path : VdfValues(root + L"\\steamapps\\libraryfolders.vdf", "path")) {
+        libraries.push_back(path);
+    }
+    for (const auto& library : libraries) {
+        const auto dirs = VdfValues(library + L"\\steamapps\\appmanifest_471710.acf", "installdir");
+        if (!dirs.empty() && Exists(library + L"\\steamapps\\common\\" + dirs[0])) {
+            return library + L"\\steamapps\\common\\" + dirs[0];
+        }
+    }
+    return {};
+}
+
+std::wstring DepotFolder(const std::wstring& root) {
+    return root.empty() ? std::wstring() : root + L"\\steamapps\\content\\app_471710\\depot_471711";
+}
+
+unsigned long long FileBytes(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+        return 0;
+    }
+    return (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+}
+
+unsigned long long FolderBytes(const std::wstring& folder) {
+    unsigned long long total = 0;
+    WIN32_FIND_DATAW entry;
+    HANDLE find = FindFirstFileExW((folder + L"\\*").c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr,
+                                   FIND_FIRST_EX_LARGE_FETCH);
+    if (find == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    do {
+        if (!wcscmp(entry.cFileName, L".") || !wcscmp(entry.cFileName, L"..")) {
+            continue;
+        }
+        if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            total += FolderBytes(folder + L"\\" + entry.cFileName);
+        } else {
+            total += (static_cast<unsigned long long>(entry.nFileSizeHigh) << 32) | entry.nFileSizeLow;
+        }
+    } while (FindNextFileW(find, &entry));
+    FindClose(find);
+    return total;
+}
+
+bool ModulesMatch(const std::wstring& folder) {
+    for (const auto& module : kModules) {
+        if (Sha256File(folder + L"\\" + module.name) != module.sha256) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SteamManaged(const std::wstring& folder) {
+    std::wstring lower = folder;
+    CharLowerBuffW(lower.data(), static_cast<DWORD>(lower.size()));
+    return lower.find(L"\\steamapps\\common\\") != std::wstring::npos;
+}
+
 void CheckFolder(std::wstring folder) {
     PostState(false, true);
     if (!LooksLikeGame(folder)) {
-        PostStatus(Bad, folder.empty() ? L"pick your rec room folder (the one with RecRoom.exe)"
-                                       : L"no rec room here. hit change and pick the folder with RecRoom.exe");
-        PostState(false, false);
+        PostStatus(Bad, L"no rec room here. install it via steam below, or hit change");
+        PostState(false, false, true);
         return;
     }
     const std::wstring stamp = Stamp(folder);
     if (stamp.empty() || stamp != Setting(L"VerifiedStamp")) {
         PostStatus(Info, L"checking game files (only the first time)...");
-        for (const auto& module : kModules) {
-            if (Sha256File(folder + L"\\" + module.name) != module.sha256) {
-                PostStatus(Bad, L"wrong rec room version. RecFlare needs build 20260323.14");
-                PostState(false, false);
-                return;
-            }
+        if (!ModulesMatch(folder)) {
+            PostStatus(Bad, L"that's a different rec room build. get 20260323.14 via steam below");
+            PostState(false, false, true);
+            return;
         }
         SaveSetting(L"VerifiedStamp", stamp);
     }
@@ -422,6 +537,192 @@ void Launch(std::wstring folder, bool vr) {
     PostState(true, false);
 }
 
+// ---- getting the game via steam ---------------------------------------------
+
+std::wstring Gigabytes(unsigned long long bytes) {
+    wchar_t text[32];
+    swprintf_s(text, L"%.1f", bytes / 1e9);
+    return text;
+}
+
+// A Steam install that has finished downloading (StateFlags 4 = fully installed).
+bool SteamInstallReady(const std::wstring& root, std::wstring& folder) {
+    folder = SteamInstall(root);
+    if (folder.empty() || !LooksLikeGame(folder) || FileBytes(folder + L"\\GameAssembly.dll") != kGameAssemblyBytes) {
+        return false;
+    }
+    std::vector<std::wstring> libraries{root};
+    for (const auto& path : VdfValues(root + L"\\steamapps\\libraryfolders.vdf", "path")) {
+        libraries.push_back(path);
+    }
+    for (const auto& library : libraries) {
+        const auto flags = VdfValues(library + L"\\steamapps\\appmanifest_471710.acf", "StateFlags");
+        if (!flags.empty()) {
+            return flags[0] == L"4";
+        }
+    }
+    return false;
+}
+
+// Follows Steam while it installs/updates Rec Room or runs download_depot, and
+// hands over whichever folder ends up holding 20260323.14.
+void WatchSteam(std::wstring root) {
+    if (InterlockedExchange(&g_watching, 1)) {
+        return;
+    }
+    const std::wstring depot = DepotFolder(root);
+    unsigned long long last = 0;
+    int stable = 0;
+    ULONGLONG nextHash = 0;
+    while (g_watching) {
+        // Normal install / update route.
+        std::wstring install;
+        if (GetTickCount64() >= nextHash && SteamInstallReady(root, install)) {
+            PostStatus(Info, L"steam is done, checking the game...");
+            if (ModulesMatch(install)) {
+                g_watching = 0;
+                PostMessageW(g_window, WM_APP_FOLDER, 0, reinterpret_cast<LPARAM>(new std::wstring(install)));
+                return;
+            }
+            nextHash = GetTickCount64() + 30000;
+        }
+        // Console download_depot route; Steam can preallocate, so wait for the size to settle.
+        const unsigned long long bytes = FolderBytes(depot);
+        stable = bytes && bytes == last ? stable + 1 : 0;
+        last = bytes;
+        if (bytes >= kDepotBytes && stable >= 2 && GetTickCount64() >= nextHash && LooksLikeGame(depot) &&
+            FileBytes(depot + L"\\GameAssembly.dll") == kGameAssemblyBytes) {
+            PostStatus(Info, L"download looks done, checking it...");
+            if (ModulesMatch(depot)) {
+                g_watching = 0;
+                PostMessageW(g_window, WM_APP_FOLDER, 0, reinterpret_cast<LPARAM>(new std::wstring(depot)));
+                return;
+            }
+            nextHash = GetTickCount64() + 30000;
+        }
+        const unsigned long long downloading = FolderBytes(root + L"\\steamapps\\downloading\\471710");
+        if (bytes) {
+            const int percent = static_cast<int>(std::min<unsigned long long>(99, bytes * 100 / kDepotBytes));
+            PostStatus(Info, L"steam is downloading rec room... " + std::to_wstring(percent) + L"% (" + Gigabytes(bytes) +
+                                 L" / " + Gigabytes(kDepotBytes) + L" GB)");
+        } else if (downloading) {
+            PostStatus(Info, L"steam is downloading rec room... " + Gigabytes(downloading) + L" GB so far");
+        } else {
+            PostStatus(Info, L"waiting for steam... this picks the game up by itself when steam is done");
+        }
+        Sleep(3000);
+    }
+}
+
+// Main route: Steam's normal install, or a verify/update if a different build is there.
+void InstallViaSteam(HWND owner) {
+    const std::wstring root = SteamRoot();
+    if (root.empty()) {
+        g_status = L"couldn't find steam. install steam first, then try again";
+        g_tone = Bad;
+        InvalidateRect(owner, nullptr, FALSE);
+        return;
+    }
+    const bool installed = !SteamInstall(root).empty();
+    ShellExecuteW(owner, L"open", installed ? L"steam://validate/471710" : L"steam://install/471710", nullptr, nullptr,
+                  SW_SHOWNORMAL);
+    std::thread(WatchSteam, root).detach();
+}
+
+void StartSteamDownload(HWND owner) {
+    const std::wstring root = SteamRoot();
+    if (root.empty()) {
+        g_status = L"couldn't find steam. install steam first, then try again";
+        g_tone = Bad;
+        InvalidateRect(owner, nullptr, FALSE);
+        return;
+    }
+    if (OpenClipboard(owner)) {
+        EmptyClipboard();
+        const size_t size = sizeof(kDepotCommand);
+        if (HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, size)) {
+            memcpy(GlobalLock(memory), kDepotCommand, size);
+            GlobalUnlock(memory);
+            if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+                GlobalFree(memory);
+            }
+        }
+        CloseClipboard();
+    }
+    ShellExecuteW(owner, L"open", L"steam://open/console", nullptr, nullptr, SW_SHOWNORMAL);
+    MessageBoxW(owner,
+                L"the steam console is opening (steam has to be running and signed in).\n\n"
+                L"1. click the text box at the bottom of the console\n"
+                L"2. press ctrl+v, the download command is already copied\n"
+                L"3. press enter\n\n"
+                L"steam downloads rec room 20260323.14 (about 6.8 GB). your login never leaves steam.\n"
+                L"leave this launcher open, it picks the game up by itself when the download is done.\n\n"
+                L"rec room has to be in your steam library for this. if it isn't, press \"install via steam\" once.",
+                L"RecFlare Launcher", MB_OK | MB_ICONINFORMATION);
+    std::thread(WatchSteam, root).detach();
+}
+
+// Copies a Steam-managed install aside so Steam updates can't replace the build.
+void CopyGame(std::wstring from, std::wstring to) {
+    PostState(false, true);
+    const unsigned long long total = FolderBytes(from);
+    unsigned long long done = 0;
+    std::vector<std::wstring> pending{L""};
+    bool ok = true;
+    while (ok && !pending.empty()) {
+        const std::wstring relative = pending.back();
+        pending.pop_back();
+        CreateDirectoryW((to + relative).c_str(), nullptr);
+        WIN32_FIND_DATAW entry;
+        HANDLE find = FindFirstFileExW((from + relative + L"\\*").c_str(), FindExInfoBasic, &entry,
+                                       FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (find == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+        do {
+            const std::wstring name = relative + L"\\" + entry.cFileName;
+            if (!wcscmp(entry.cFileName, L".") || !wcscmp(entry.cFileName, L"..")) {
+                continue;
+            }
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                pending.push_back(name);
+                continue;
+            }
+            ok = CopyFileExW((from + name).c_str(), (to + name).c_str(), nullptr, nullptr, nullptr, 0) != 0;
+            done += (static_cast<unsigned long long>(entry.nFileSizeHigh) << 32) | entry.nFileSizeLow;
+            PostStatus(Info, L"copying rec room... " +
+                                 std::to_wstring(total ? static_cast<int>(done * 100 / total) : 0) + L"%");
+        } while (ok && FindNextFileW(find, &entry));
+        FindClose(find);
+    }
+    if (!ok) {
+        PostStatus(Bad, L"copy failed (out of space?). nothing was changed in your steam install");
+        PostState(true, false);
+        return;
+    }
+    PostMessageW(g_window, WM_APP_FOLDER, 1, reinterpret_cast<LPARAM>(new std::wstring(to)));
+}
+
+// Puts the stock RecRoom.exe back and removes the loader and patch.
+void Undo(std::wstring folder) {
+    PostState(g_ready, true, g_needGame);
+    if (GameRunning(folder + L"\\RecRoom.exe")) {
+        PostStatus(Bad, L"close rec room first");
+        PostState(g_ready, false, g_needGame);
+        return;
+    }
+    const std::wstring exe = folder + L"\\RecRoom.exe", backup = folder + L"\\RecRoom.original.exe";
+    bool ok = true;
+    if (Exists(backup)) {
+        ok = MoveFileExW(backup.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    }
+    DeleteFileW((folder + L"\\2026loader.dll").c_str());
+    DeleteFileW((folder + L"\\2026patch.dll").c_str());
+    PostStatus(ok ? Good : Bad, ok ? L"RecFlare removed, RecRoom.exe is stock again (play puts it back)"
+                                   : L"couldn't restore RecRoom.exe (try running the launcher as admin)");
+    PostState(g_ready, false, g_needGame);
+}
+
 // ---- UI ---------------------------------------------------------------------
 
 bool PickFolder(HWND owner, std::wstring& folder) {
@@ -509,7 +810,7 @@ void DrawButton(const DRAWITEMSTRUCT* item) {
     wchar_t label[64]{};
     GetWindowTextW(item->hwndItem, label, 64);
 
-    if (id == IDC_CHANGE || id == IDC_FOLDER) {
+    if (id == IDC_CHANGE || id == IDC_FOLDER || id == IDC_UNDO) {
         Gdiplus::Font* font = MakeFont(L"Segoe UI Semibold", static_cast<float>(S(13)),
                                        hot ? Gdiplus::FontStyleUnderline : Gdiplus::FontStyleRegular);
         DrawLabel(g, label, font, enabled ? (hot ? kOrangeB : Rgb(0xFF, 0x7A, 0x1A)) : kMuted,
@@ -599,11 +900,18 @@ void Paint(HWND hwnd) {
 }
 
 void UpdateButtons() {
-    const bool canPlay = g_ready && !g_busy;
-    EnableWindow(g_play, canPlay);
-    EnableWindow(g_vr, canPlay);
+    const bool steam = g_needGame && !g_ready;
+    const bool installed = steam && !SteamInstall(SteamRoot()).empty();
+    SetWindowTextW(g_play, !steam ? L"PLAY" : installed ? L"UPDATE VIA STEAM" : L"INSTALL VIA STEAM");
+    SetWindowTextW(g_vr, steam ? L"OLD BUILD VIA STEAM CONSOLE" : L"PLAY IN VR");
+    const bool canUse = (g_ready || g_needGame) && !g_busy;
+    EnableWindow(g_play, canUse);
+    EnableWindow(g_vr, canUse);
     EnableWindow(g_change, !g_busy);
     EnableWindow(g_open, !g_folder.empty());
+    EnableWindow(g_undo, !g_folder.empty() && !g_busy && Exists(g_folder + L"\\RecRoom.original.exe"));
+    InvalidateRect(g_play, nullptr, FALSE);
+    InvalidateRect(g_vr, nullptr, FALSE);
 }
 
 LRESULT CALLBACK ButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
@@ -639,7 +947,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_play = MakeButton(hwnd, IDC_PLAY, L"PLAY", 32, 362, 356, 60);
         g_vr = MakeButton(hwnd, IDC_VR, L"PLAY IN VR", 32, 432, 356, 46);
         g_change = MakeButton(hwnd, IDC_CHANGE, L"change", 318, 318, 70, 28);
-        g_open = MakeButton(hwnd, IDC_FOLDER, L"open game folder", 120, 520, 180, 26);
+        g_open = MakeButton(hwnd, IDC_FOLDER, L"open game folder", 40, 520, 160, 26);
+        g_undo = MakeButton(hwnd, IDC_UNDO, L"undo recflare", 220, 520, 160, 26);
         UpdateButtons();
         return 0;
     case WM_ERASEBKGND:
@@ -654,10 +963,49 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IDC_PLAY:
         case IDC_VR:
+            if (g_needGame && !g_busy) {
+                if (LOWORD(wp) == IDC_PLAY) {
+                    InstallViaSteam(hwnd);
+                } else {
+                    // Fallback for when Steam's own build isn't 20260323.14 any more.
+                    StartSteamDownload(hwnd);
+                }
+                return 0;
+            }
             if (g_ready && !g_busy) {
+                // A Steam-managed install changes when Steam updates it; offer a separate copy once.
+                if (SteamManaged(g_folder) && Setting(L"CopyOffered") != g_folder) {
+                    SaveSetting(L"CopyOffered", g_folder);
+                    const int answer = MessageBoxW(
+                        hwnd,
+                        L"this is steam's own rec room install. if steam ever updates it, RecFlare stops working "
+                        L"until you get 20260323.14 again.\n\n"
+                        L"make a separate copy for RecFlare first? (about 6.8 GB)\n\n"
+                        L"yes = copy it (you pick where)\nno = use the steam install as it is",
+                        L"RecFlare Launcher", MB_YESNOCANCEL | MB_ICONQUESTION);
+                    if (answer == IDCANCEL) {
+                        return 0;
+                    }
+                    std::wstring parent;
+                    if (answer == IDYES) {
+                        if (PickFolder(hwnd, parent)) {
+                            std::thread(CopyGame, g_folder, parent + L"\\RecFlare 2026").detach();
+                        }
+                        return 0;
+                    }
+                }
                 g_busy = true;
                 UpdateButtons();
                 std::thread(Launch, g_folder, LOWORD(wp) == IDC_VR).detach();
+            }
+            return 0;
+        case IDC_UNDO:
+            if (!g_busy && !g_folder.empty() &&
+                MessageBoxW(hwnd,
+                            L"put RecRoom.exe back to stock and remove the RecFlare files from this folder?\n"
+                            L"(your 2026patch.ini stays. pressing play later sets it up again)",
+                            L"RecFlare Launcher", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                std::thread(Undo, g_folder).detach();
             }
             return 0;
         case IDC_CHANGE: {
@@ -682,10 +1030,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_APP_STATE:
         g_ready = wp != 0;
-        g_busy = lp != 0;
+        g_busy = (lp & 1) != 0;
+        g_needGame = (lp & 2) != 0;
+        if (g_ready) {
+            g_watching = 0;
+        }
         UpdateButtons();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
+    case WM_APP_FOLDER: {
+        // A finished steam download (wp 0) or a finished copy (wp 1).
+        auto* folder = reinterpret_cast<std::wstring*>(lp);
+        SetFolder(*folder);
+        delete folder;
+        return 0;
+    }
     case WM_APP_DONE:
         DestroyWindow(hwnd);
         return 0;
@@ -771,20 +1130,43 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     ShowWindow(g_window, show);
     UpdateWindow(g_window);
 
-    // Folder: --folder, then the saved one, then the launcher's own folder.
+    // Folder: --folder, else the first right-sized install among the saved one,
+    // the launcher's own folder, a steam download_depot and steam's install.
+    const std::wstring steamRoot = SteamRoot();
+    const std::wstring depot = DepotFolder(steamRoot);
+    const std::wstring steamInstall = steamRoot.empty() ? std::wstring() : SteamInstall(steamRoot);
     std::wstring folder = folderArg;
     if (folder.empty()) {
-        folder = Setting(L"GameFolder");
+        const std::wstring candidates[] = {Setting(L"GameFolder"), ExeFolder(), depot, steamInstall};
+        for (const auto& candidate : candidates) {
+            if (LooksLikeGame(candidate) && FileBytes(candidate + L"\\GameAssembly.dll") == kGameAssemblyBytes) {
+                folder = candidate;
+                break;
+            }
+        }
+        for (const auto& candidate : candidates) {
+            if (folder.empty() && LooksLikeGame(candidate)) {
+                folder = candidate;
+            }
+        }
     }
-    if (!LooksLikeGame(folder) && LooksLikeGame(ExeFolder())) {
-        folder = ExeFolder();
-    }
-    if (!folderArg.empty() || LooksLikeGame(folder)) {
+    if (!folder.empty()) {
         SetFolder(folder);
+        // Picked a different build while a download_depot sits half done: follow it.
+        if (FileBytes(folder + L"\\GameAssembly.dll") != kGameAssemblyBytes && !depot.empty() && Exists(depot) &&
+            folder != depot) {
+            std::thread(WatchSteam, steamRoot).detach();
+        }
     } else {
-        g_status = L"pick your rec room folder (the one with RecRoom.exe)";
+        g_needGame = true;
+        g_status = L"no rec room found. get it via steam below (or hit change)";
         g_tone = Info;
+        UpdateButtons();
         InvalidateRect(g_window, nullptr, FALSE);
+        // A download_depot that's already under way: keep following it.
+        if (!depot.empty() && Exists(depot)) {
+            std::thread(WatchSteam, steamRoot).detach();
+        }
     }
 
     MSG msg;

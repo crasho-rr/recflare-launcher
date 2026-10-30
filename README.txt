@@ -6,12 +6,21 @@ just hit play [:
 
 how to use
 ----------
-1. you need rec room 20260323.14 installed already (steam manifest 8867414017562658247).
-   this zip does NOT include the game, only the launcher.
-2. open "RecFlare Launcher.exe" (you can put it anywhere, or right in the game folder)
-3. if it doesn't find the game by itself hit "change" and pick the folder with RecRoom.exe
-4. press PLAY (desktop) or PLAY IN VR
+1. open "RecFlare Launcher.exe" (you can put it anywhere). this zip doesn't include the game,
+   you get that from steam, your login stays in steam the whole time
+2. it looks for rec room in your steam libraries by itself
+   - no rec room? press INSTALL VIA STEAM and let steam install it (it's free)
+   - different build? press UPDATE VIA STEAM
+   leave the launcher open, it picks the game up when steam is done
+3. press PLAY (desktop) or PLAY IN VR
    the first time it checks your game files which takes a few secs
+   if it's your normal steam install it asks if you want a separate copy first, so a future
+   steam update can't break RecFlare (6.8 GB, totally optional)
+
+steam's current rec room is the right build (20260323.14). if that ever changes, press
+OLD BUILD VIA STEAM CONSOLE: it copies a download command and opens steam's console, you paste
+it with ctrl+v and steam downloads the exact build (manifest 8867414017562658247).
+got rec room somewhere else? hit "change" and pick the folder with RecRoom.exe
 
 what it does to your game folder
 --------------------------------
@@ -22,7 +31,8 @@ what it does to your game folder
   (use +forcemode:screen or +forcemode:vr, or just use the launcher)
 - GameAssembly.dll / Referee.dll / UnityPlayer.dll are never touched
 
-to undo: delete RecRoom.exe, rename RecRoom.original.exe back to RecRoom.exe and delete 2026loader.dll
+to undo: press "undo recflare" in the launcher. heads up: if you set up your normal steam install,
+launching rec room from steam also loads RecFlare until you undo (or steam verifies the files)
 
 shortcut tricks
 ---------------

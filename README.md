@@ -4,8 +4,15 @@
 
 one click launcher for RecFlare on rec room **20260323.14**. no injector!!
 
-**download:** grab `RecFlare Launcher.zip` from [releases](../../releases/latest), unzip, run `RecFlare Launcher.exe`, press play.
-you need the 20260323.14 build of rec room already installed, the game isn't included.
+**download:** grab `RecFlare.Launcher.zip` from [releases](../../releases/latest), unzip, run `RecFlare Launcher.exe`, press play.
+
+the game isn't included, it comes from steam (steam's current rec room is 20260323.14). the launcher finds it in your steam
+libraries, and if it's missing or a different build it gives you **install / update via steam** buttons and picks the game
+up when steam is done. fallback if steam ever moves on: **old build via steam console** copies
+`download_depot 471710 471711 8867414017562658247` and opens the steam console. your steam login never leaves steam.
+
+on a normal steam install it offers to make a separate copy first so steam updates can't break it, and there's an
+**undo recflare** button that puts the stock exe back.
 
 ## how it works
 
